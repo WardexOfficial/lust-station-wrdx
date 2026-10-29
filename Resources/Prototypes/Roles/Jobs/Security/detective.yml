@@ -10,7 +10,6 @@
   startingGear: DetectiveGear
   icon: "JobIconDetective"
   supervisors: job-supervisors-hos
-  canBeAntag: false
   displayWeight: 20  # Sunrise
   # Sunrise-Start
   alternativeTitles:
@@ -31,6 +30,8 @@
     implants: [ MindShieldImplant ]
   speciesBlacklist:
   - Vox
+  - Resomi # Lust-Edit
+  #- Felinid # Lust-Edit
 
 - type: startingGear
   id: DetectiveGear

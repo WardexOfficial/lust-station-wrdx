@@ -13,6 +13,7 @@ using Content.Shared.Emag.Systems;
 using Content.Shared.Materials;
 using Content.Shared.Paper;
 using Content.Shared.Labels.EntitySystems;
+using Content.Shared.Weapons.Melee.Events; // Lust edit
 using Robust.Server.GameObjects;
 using Robust.Shared.Audio.Systems;
 using Robust.Shared.Configuration;
@@ -25,20 +26,20 @@ namespace Content.Server._Sunrise.CopyMachine;
 
 public sealed partial class CopyMachineSystem : EntitySystem
 {
-    [Dependency] private readonly SharedAppearanceSystem _appearance = default!;
-    [Dependency] private readonly SharedSolutionContainerSystem _solutionContainer = default!;
-    [Dependency] private readonly IPrototypeManager _prototypeManager = default!;
-    [Dependency] private readonly PaperSystem _paper = default!;
-    [Dependency] private readonly UserInterfaceSystem _userInterface = default!;
-    [Dependency] private readonly ItemSlotsSystem _itemSlots = default!;
-    [Dependency] private readonly MaterialStorageSystem _materialStorage = default!;
-    [Dependency] private readonly IResourceManager _resourceManager = default!;
-    [Dependency] private readonly IGameTiming _gameTiming = default!;
-    [Dependency] private readonly IConfigurationManager _configManager = default!;
-    [Dependency] private readonly EmagSystem _emag = default!;
-    [Dependency] private readonly SharedAudioSystem _audioSystem = default!;
-    [Dependency] private readonly LabelSystem _label = default!;
-    [Dependency] private readonly DocumentFormatSystem _documentFormat = default!;
+    [Dependency] private SharedAppearanceSystem _appearance = default!;
+    [Dependency] private SharedSolutionContainerSystem _solutionContainer = default!;
+    [Dependency] private IPrototypeManager _prototypeManager = default!;
+    [Dependency] private PaperSystem _paper = default!;
+    [Dependency] private UserInterfaceSystem _userInterface = default!;
+    [Dependency] private ItemSlotsSystem _itemSlots = default!;
+    [Dependency] private MaterialStorageSystem _materialStorage = default!;
+    [Dependency] private IResourceManager _resourceManager = default!;
+    [Dependency] private IGameTiming _gameTiming = default!;
+    [Dependency] private IConfigurationManager _configManager = default!;
+    [Dependency] private EmagSystem _emag = default!;
+    [Dependency] private SharedAudioSystem _audioSystem = default!;
+    [Dependency] private LabelSystem _label = default!;
+    [Dependency] private DocumentFormatSystem _documentFormat = default!;
 
     private readonly Dictionary<string, string> _documentContentByTemplateId = new();
 
@@ -57,7 +58,7 @@ public sealed partial class CopyMachineSystem : EntitySystem
         SubscribeLocalEvent<CopyMachineComponent, CopyMachineCopyMessage>(OnCopyRequested);
         SubscribeLocalEvent<CopyMachineComponent, CopyMachineCancelJobMessage>(OnCancelJobRequested);
         SubscribeLocalEvent<CopyMachineComponent, MapInitEvent>(OnMapInit);
-        SubscribeLocalEvent<CopyMachineComponent, SolutionContainerChangedEvent>(OnSolutionChanged);
+        SubscribeLocalEvent<CopyMachineComponent, SolutionChangedEvent>(OnSolutionChanged);
         SubscribeLocalEvent<CopyMachineComponent, EntInsertedIntoContainerMessage>(OnEntityInsertedIntoCopySlot);
         SubscribeLocalEvent<CopyMachineComponent, EntRemovedFromContainerMessage>(OnEntityRemovedFromCopySlot);
         SubscribeLocalEvent<CopyMachineComponent, MaterialAmountChangedEvent>(OnMaterialAmountChanged);
@@ -65,6 +66,7 @@ public sealed partial class CopyMachineSystem : EntitySystem
         SubscribeLocalEvent<CopyMachineComponent, UnstrappedEvent>(OnEntityUnstrapped);
         SubscribeLocalEvent<CopyMachineComponent, GotEmaggedEvent>(OnEmagged);
         SubscribeLocalEvent<CopyMachineComponent, ComponentShutdown>(OnShutdown);
+        SubscribeLocalEvent<CopyMachineComponent, AttackedEvent>(OnAttacked); // Lust edit
 
         _configManager.OnValueChanged(SunriseCCVars.DocumentTemplatePool, _ =>
         {
@@ -188,7 +190,7 @@ public sealed partial class CopyMachineSystem : EntitySystem
     }
 
     private void OnUiOpened(Entity<CopyMachineComponent> ent, ref BoundUIOpenedEvent args) => UpdateUserInterface(ent);
-    private void OnSolutionChanged(Entity<CopyMachineComponent> ent, ref SolutionContainerChangedEvent args) => QueueUIUpdate(ent);
+    private void OnSolutionChanged(Entity<CopyMachineComponent> ent, ref SolutionChangedEvent args) => QueueUIUpdate(ent);
     private void OnEntityRemovedFromCopySlot(Entity<CopyMachineComponent> ent, ref EntRemovedFromContainerMessage args)
     {
         if (args.Container.ID != CopyMachineComponent.CopySlotId)
@@ -248,6 +250,7 @@ public sealed partial class CopyMachineSystem : EntitySystem
     {
         _itemSlots.AddItemSlot(ent, CopyMachineComponent.CopySlotId, ent.Comp.CopySlot);
         UpdateRunningAppearance(ent, false);
+        UpdateJamAppearance(ent, ent.Comp.IsJammed); // Lust edit
 
         UpdateAvailableTemplates(ent);
 
@@ -321,13 +324,17 @@ public sealed partial class CopyMachineSystem : EntitySystem
         ent.Comp.CurrentJobView = new CopyMachineJobView(GetJobDisplayTitle(jobType, templateId), jobType, templateId);
 
         QueueUIUpdate(ent);
+        // Lust edit start
+        if (TryStartJamJob(ent))
+            return;
+        // Lust edit end
         _audioSystem.PlayPvs(ent.Comp.PrintSound, ent);
     }
 
     private void CompleteCurrentJob(Entity<CopyMachineComponent> ent)
     {
         var jobView = ent.Comp.CurrentJobView;
-        if (jobView != null)
+        if (jobView != null && !TryCompleteJamJob(ent)) //  Lust edit
         {
             var jobType = jobView.Type;
             var templateId = jobView.TemplateId;
@@ -372,7 +379,7 @@ public sealed partial class CopyMachineSystem : EntitySystem
 
     private bool TryConsumeInkAndPaper(Entity<CopyMachineComponent> ent)
     {
-        if (!_solutionContainer.TryGetSolution(ent.Owner, ent.Comp.Solution, out _, out var solution))
+        if (!_solutionContainer.TryGetSolution(ent.Owner, ent.Comp.Solution, out var solutionEntity, out var solution))
             return false;
 
         var inkReagentId = new ReagentId(ent.Comp.IncReagentProto, null);
@@ -383,7 +390,7 @@ public sealed partial class CopyMachineSystem : EntitySystem
         if (!_materialStorage.TryChangeMaterialAmount(ent, ent.Comp.PaperMaterial, -ent.Comp.PaperCost))
             return false;
 
-        solution.RemoveReagent(inkReagentId, ent.Comp.IncCost);
+        _solutionContainer.RemoveReagent(solutionEntity.Value, inkReagentId, ent.Comp.IncCost);
 
         return true;
     }
